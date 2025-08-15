@@ -17,7 +17,6 @@ class _ARScreenState extends State<ARScreen> {
 
   String get currentMapName => _currentMapName;
   List<Map<String, dynamic>> _placedObjects = [];
-  String _selectedObjectType = 'video';
 
   @override
   void initState() {
