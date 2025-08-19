@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_application_ar/models/ar_location_model.dart';
 import '../services/ar_service.dart';
 import '../widgets/ar_platform_view.dart';
 
 class ARScreen extends StatefulWidget {
-  const ARScreen({super.key});
+  final ArLocation? arData;
+  const ARScreen({super.key, this.arData});
 
   @override
   State<ARScreen> createState() => _ARScreenState();
@@ -23,6 +25,17 @@ class _ARScreenState extends State<ARScreen> {
     super.initState();
     // AR session will be started automatically by ARPlatformView
     _loadPlacedObjects();
+    _setARLocationData();
+  }
+
+  Future<void> _setARLocationData() async {
+    if (widget.arData != null) {
+      final culturalSiteId = widget.arData!.culturalSite?.id ?? 0;
+      final arLocationId = widget.arData!.id ?? 0;
+
+      await _arService.setARLocationData(culturalSiteId, arLocationId);
+      print('DEBUG: AR location data set for AR view');
+    }
   }
 
   @override
@@ -48,7 +61,9 @@ class _ARScreenState extends State<ARScreen> {
     return Scaffold(
       resizeToAvoidBottomInset: false,
       appBar: AppBar(
-        title: const Text('AR View'),
+        title: Text(
+          widget.arData?.arLocationTranslations?.last.name ?? 'AR View',
+        ),
         backgroundColor: Colors.green[600],
         foregroundColor: Colors.white,
         actions: [
@@ -90,6 +105,20 @@ class _ARScreenState extends State<ARScreen> {
     );
   }
 
+  Future<void> _handleMenuAction(String action) async {
+    switch (action) {
+      case 'save_map':
+        await _showSaveMapDialog();
+        break;
+      case 'load_map':
+        await _showLoadMapDialog();
+        break;
+      case 'reset':
+        await _resetARSession();
+        break;
+    }
+  }
+
   Future<void> _togglePlaneDetection() async {
     if (_isPlaneDetectionEnabled) {
       await _arService.disablePlaneDetection();
@@ -99,20 +128,6 @@ class _ARScreenState extends State<ARScreen> {
     setState(() {
       _isPlaneDetectionEnabled = !_isPlaneDetectionEnabled;
     });
-  }
-
-  void _handleMenuAction(String action) {
-    switch (action) {
-      case 'save_map':
-        _showSaveMapDialog();
-        break;
-      case 'load_map':
-        _showLoadMapDialog();
-        break;
-      case 'reset':
-        _resetARSession();
-        break;
-    }
   }
 
   Future<void> _showSaveMapDialog() async {

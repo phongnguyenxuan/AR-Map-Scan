@@ -42,6 +42,10 @@ class ARController: NSObject {
     private var trackingStatusLabel: UILabel?
     private var relocalizingLabel: UILabel?
     private var toggleStatusButton: UIButton?
+    
+    // MARK: - AR Location Data
+    private var currentCulturalSiteId: Int?
+    private var currentArLocationId: Int?
 
     // Storage for world maps and objects
     private let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
@@ -167,6 +171,9 @@ class ARController: NSObject {
         // Add native tap gesture recognizer for video placement
         setupNativeTapGesture(for: view)
         
+        // Setup gesture recognizers for zoom and rotate (like ContentView)
+        setupGestureRecognizers(for: view)
+        
         // Setup status overlay
         setupStatusOverlay()
         
@@ -216,6 +223,15 @@ class ARController: NSObject {
             pauseARSession(result: result)
         case "resetARSession":
             resetARSession(result: result)
+        case "setARLocationData":
+            if let args = call.arguments as? [String: Any],
+               let culturalSiteId = args["culturalSiteId"] as? Int,
+               let arLocationId = args["arLocationId"] as? Int {
+                setARLocationData(culturalSiteId: culturalSiteId, arLocationId: arLocationId)
+                result(true)
+            } else {
+                result(FlutterError(code: "INVALID_ARGUMENTS", message: "Invalid arguments for setARLocationData", details: nil))
+            }
         case "saveWorldMap":
             if let args = call.arguments as? [String: Any],
                let mapName = args["mapName"] as? String {
@@ -280,6 +296,10 @@ class ARController: NSObject {
                 let videoNode = createVideoEntity(at: position, videoPath: videoPath)
                 let objectId = "video_\(Date().timeIntervalSince1970)"
                 placedObjects[objectId] = videoNode
+                
+                // Auto-select video mới nhất cho gesture control
+                setCurrentVideoEntity(videoNode)
+                
                 result(objectId)
             } else {
                 result(FlutterError(code: "INVALID_ARGUMENTS", message: "Position and video path required", details: nil))
@@ -354,6 +374,29 @@ class ARController: NSObject {
             getExportedMapsDirectory(result: result)
         case "openFilesAppDirectly":
             openFilesAppDirectly(result: result)
+        case "setupGestureRecognizers":
+            if let arView = self.arView {
+                setupGestureRecognizers(for: arView)
+                result(true)
+            } else {
+                result(FlutterError(code: "NO_ARVIEW", message: "ARView not available", details: nil))
+            }
+        case "enableGestureControl":
+            if let args = call.arguments as? [String: Any],
+               let enabled = args["enabled"] as? Bool {
+                enableGestureControl(enabled)
+                result(true)
+            } else {
+                result(FlutterError(code: "INVALID_ARGUMENTS", message: "Enabled parameter required", details: nil))
+            }
+        case "selectVideoForGestureControl":
+            if let args = call.arguments as? [String: Any],
+               let objectId = args["objectId"] as? String {
+                selectVideoForGestureControl(objectId)
+                result(true)
+            } else {
+                result(FlutterError(code: "INVALID_ARGUMENTS", message: "Object ID required", details: nil))
+            }
         // Removed angle-based video switching methods
         default:
             result(FlutterMethodNotImplemented)
@@ -361,9 +404,31 @@ class ARController: NSObject {
     }
 
     private func spawnNode(from args: [String: Any], at transform: simd_float4x4) {
-        let videoPath = args["videoPath"] as? String ?? "assets/video_(0).mov"
         let pos = transform.columns.3
         let position = SIMD3<Float>(pos.x, pos.y, pos.z)
+        
+        // Try to use downloaded video first, fallback to provided path or default
+        var videoPath = args["videoPath"] as? String ?? "assets/video_(0).mov"
+        
+        print("🔍 DEBUG spawnNode - Current AR location data:")
+        print("   culturalSiteId: \(currentCulturalSiteId?.description ?? "nil")")
+        print("   arLocationId: \(currentArLocationId?.description ?? "nil")")
+        
+        // Check if we have AR location data and try to get downloaded video
+        if let culturalSiteId = currentCulturalSiteId,
+           let arLocationId = currentArLocationId {
+            print("🔍 Searching for downloaded video: culturalSiteId=\(culturalSiteId), arLocationId=\(arLocationId)")
+            
+            if let downloadedVideoURL = getDownloadedVideoURL(for: culturalSiteId, arLocationId: arLocationId) {
+                videoPath = downloadedVideoURL.path
+                print("🎬 ✅ Using downloaded video: \(videoPath)")
+            } else {
+                print("🎬 ❌ No downloaded video found, using fallback: \(videoPath)")
+            }
+        } else {
+            print("🎬 ❌ AR location data not set, using fallback: \(videoPath)")
+        }
+        
         let objectEntity = self.createVideoEntity(at: position, videoPath: videoPath)
 
         if let scale = args["scale"] as? Double { 
@@ -381,12 +446,17 @@ class ARController: NSObject {
 
         let objectId = (args["objectId"] as? String) ?? self.virtualObjectAnchorName
         self.placedObjects[objectId] = objectEntity
+        
+        // Auto-select video mới nhất cho gesture control
+        setCurrentVideoEntity(objectEntity)
+        
         if let anchor = self.virtualObjectAnchor {
             // Create AnchorEntity from ARAnchor
             let anchorEntity = AnchorEntity(anchor: anchor)
             self.anchors[objectId] = anchorEntity
         }
         print("Spawned deferred entity at position: \(objectEntity.position)")
+        print("🎯 Auto-selected video cho gesture control")
     }
 
     // MARK: - AR Session Management
@@ -440,6 +510,13 @@ class ARController: NSObject {
 
         arSession?.run(configuration)
         isSessionRunning = true
+        
+        // Setup gesture recognizers after AR session starts
+        if let arView = self.arView {
+            setupGestureRecognizers(for: arView)
+        }
+        
+        print("✅ AR Session started successfully với gesture recognizers")
         result(true)
     }
 
@@ -556,14 +633,49 @@ class ARController: NSObject {
                     let mapURL = self?.worldMapsPath.appendingPathComponent("\(mapName).worldmap")
                     try mapData.write(to: mapURL!, options: [.atomic])
 
-                    // Save object data
+                    // Save object data với transform đầy đủ
                     self?.saveObjectData(for: mapName)
+                    
+                    // Save metadata về world map
+                    self?.saveWorldMapMetadata(for: mapName, worldMap: worldMap)
+
+                    print("✅ Đã lưu ARWorldMap thành công: \(mapName)")
+                    print("📁 WorldMap: \(mapURL?.path ?? "")")
+                    print("🎯 Bao gồm transform đầy đủ cho tất cả video objects")
 
                     result(true)
                 } catch {
                     result(FlutterError(code: "SAVE_ERROR", message: error.localizedDescription, details: nil))
                 }
             }
+        }
+    }
+    
+    private func saveWorldMapMetadata(for mapName: String, worldMap: ARWorldMap) {
+        let metadata: [String: Any] = [
+            "mapName": mapName,
+            "timestamp": Date().timeIntervalSince1970,
+            "anchorCount": worldMap.anchors.count,
+            "center": [
+                worldMap.center.x,
+                worldMap.center.y,
+                worldMap.center.z
+            ],
+            "extent": [
+                worldMap.extent.x,
+                worldMap.extent.y,
+                worldMap.extent.z
+            ]
+        ]
+        
+        do {
+            let metadataData = try JSONSerialization.data(withJSONObject: metadata, options: .prettyPrinted)
+            let metadataURL = worldMapsPath.appendingPathComponent("\(mapName)_metadata.json")
+            try metadataData.write(to: metadataURL)
+            
+            print("📋 Đã lưu metadata cho map: \(mapName)")
+        } catch {
+            print("❌ Lỗi khi lưu metadata: \(error.localizedDescription)")
         }
     }
 
@@ -855,11 +967,22 @@ class ARController: NSObject {
     // MARK: - Enhanced Video Entity Creation (RealityKit-style)
     
     private func createVideoEntity(at position: SIMD3<Float>, videoPath: String) -> ModelEntity {
-        // Load video from Flutter assets instead of Bundle.main
-        let videoFileName = videoPath.replacingOccurrences(of: "assets/", with: "")
-        guard let videoURL = getFlutterAssetURL(for: videoFileName) else {
-            print("❌ Video asset not found: \(videoPath)")
-            return createFallbackVideoEntity(at: position)
+        let videoURL: URL
+        
+        // Check if this is a local file path or Flutter asset path
+        if videoPath.hasPrefix("/") {
+            // Local file path - create file URL directly
+            videoURL = URL(fileURLWithPath: videoPath)
+            print("🎬 Using local video file: \(videoPath)")
+        } else {
+            // Flutter asset path - use existing asset loading logic
+            let videoFileName = videoPath.replacingOccurrences(of: "assets/", with: "")
+            guard let assetURL = getFlutterAssetURL(for: videoFileName) else {
+                print("❌ Video asset not found: \(videoPath)")
+                return createFallbackVideoEntity(at: position)
+            }
+            videoURL = assetURL
+            print("🎬 Using Flutter asset: \(videoPath)")
         }
         
         // Create player - match ContentView.swift approach exactly
@@ -1147,9 +1270,19 @@ class ARController: NSObject {
     
     private func createVideoEntityWithVideoCameraKit(at position: SIMD3<Float>, videoPath: String) -> ModelEntity {
         // Create video entity using VideoCameraKit approach for precise positioning
-        guard let videoURL = getFlutterAssetURL(for: videoPath.replacingOccurrences(of: "assets/", with: "")) else {
-            print("❌ Video asset not found: \(videoPath)")
-            return createFallbackVideoEntityWithVideoCameraKit(at: position)
+        let videoURL: URL
+        if videoPath.hasPrefix("/") {
+            // Local file path
+            videoURL = URL(fileURLWithPath: videoPath)
+            print("🎬 Using local video file: \(videoPath)")
+        } else {
+            // Flutter asset path
+            guard let assetURL = getFlutterAssetURL(for: videoPath.replacingOccurrences(of: "assets/", with: "")) else {
+                print("❌ Video asset not found: \(videoPath)")
+                return createFallbackVideoEntityWithVideoCameraKit(at: position)
+            }
+            videoURL = assetURL
+            print("🎬 Using Flutter asset: \(videoPath)")
         }
         
         // Create player with VideoCameraKit optimization
@@ -1265,6 +1398,9 @@ class ARController: NSObject {
             print("📍 Anchor world position: \(position)")
             print("📍 Entity local position: \(entity.position) (should be near origin)")
             
+            // Auto-select video cho gesture control (ContentView style)
+            setCurrentVideoEntity(entity)
+            
             return entity
             
         } catch {
@@ -1284,19 +1420,27 @@ class ARController: NSObject {
     private func debugWorldPositioning() {
         print("🔍 === DEBUG WORLD POSITIONING ===")
         for (objectId, entity) in placedObjects {
-            let localPosition = entity.position
-            let worldPosition = entity.position(relativeTo: nil)
-            
             if let anchor = entity.parent as? AnchorEntity {
-                let anchorWorldPosition = anchor.position(relativeTo: nil)
-                print("🎯 Object \(objectId):")
-                print("   Local position: \(localPosition)")
-                print("   Entity world position: \(worldPosition)")
-                print("   Anchor world position: \(anchorWorldPosition)")
+                let anchorWorldPos = anchor.position(relativeTo: nil)
+                let entityLocalPos = entity.transform.translation
+                let entityWorldPos = entity.position(relativeTo: nil)
+                
+                print("📦 Object: \(objectId)")
+                print("   📍 Anchor World Position: \(anchorWorldPos)")
+                print("   📍 Entity Local Position: \(entityLocalPos)")
+                print("   📍 Entity World Position: \(entityWorldPos)")
+                print("   🔄 Entity Rotation: \(entity.transform.rotation)")
+                print("   📏 Entity Scale: \(entity.transform.scale)")
+                print("   🎬 Video Path: \(entity.name ?? "Unknown")")
+                print("")
             } else {
-                print("🎯 Object \(objectId):")
-                print("   Local position: \(localPosition)")
-                print("   World position: \(worldPosition)")
+                let worldPos = entity.position(relativeTo: nil)
+                print("📦 Object: \(objectId) (No Anchor)")
+                print("   📍 World Position: \(worldPos)")
+                print("   🔄 Rotation: \(entity.transform.rotation)")
+                print("   📏 Scale: \(entity.transform.scale)")
+                print("   🎬 Video Path: \(entity.name ?? "Unknown")")
+                print("")
             }
         }
         print("🔍 === END DEBUG ===")
@@ -1326,10 +1470,6 @@ class ARController: NSObject {
         
         // Send status to Flutter
         sendStatusToFlutter()
-        
-        // Log status changes
-        print("🌍 World Mapping Status: \(mappingStatusText)")
-        print("📱 Tracking Status: \(trackingStatusText)")
     }
     
     private func getMappingStatusText(_ status: ARFrame.WorldMappingStatus) -> String {
@@ -1381,8 +1521,6 @@ class ARController: NSObject {
         if let methodChannel = getMethodChannel() {
             methodChannel.invokeMethod("onWorldMappingStatusUpdate", arguments: statusData)
         }
-        
-        print("📡 Sent status to Flutter: \(statusData)")
     }
     
     private func getMethodChannel() -> FlutterMethodChannel? {
@@ -1716,6 +1854,9 @@ class ARController: NSObject {
         placedObjects.removeAll()
         anchors.removeAll()
         
+        // Clear current video entity for gesture control
+        setCurrentVideoEntity(nil)
+        
         print("🗑️ Removed all placed objects for single video placement")
     }
     
@@ -1740,17 +1881,44 @@ class ARController: NSObject {
         // Remove existing video if any (single placement like ContentView.swift)
         removeAllPlacedObjects()
         
-        // Create video entity using VideoCameraKit approach
+        // Create video entity using VideoCameraKit approach with downloaded video logic
         print("🎯 Creating video entity with VideoCameraKit approach")
-        let videoEntity = createVideoEntityWithVideoCameraKit(at: position, videoPath: "assets/video_(0).mov")
+        
+        // Try to use downloaded video first, fallback to default
+        var videoPath = "assets/video_(0).mov"
+        
+        print("🔍 DEBUG handleTap - Current AR location data:")
+        print("   culturalSiteId: \(currentCulturalSiteId?.description ?? "nil")")
+        print("   arLocationId: \(currentArLocationId?.description ?? "nil")")
+        
+        // Check if we have AR location data and try to get downloaded video
+        if let culturalSiteId = currentCulturalSiteId,
+           let arLocationId = currentArLocationId {
+            print("🔍 Searching for downloaded video: culturalSiteId=\(culturalSiteId), arLocationId=\(arLocationId)")
+            
+            if let downloadedVideoURL = getDownloadedVideoURL(for: culturalSiteId, arLocationId: arLocationId) {
+                videoPath = downloadedVideoURL.path
+                print("🎬 ✅ Using downloaded video: \(videoPath)")
+            } else {
+                print("🎬 ❌ No downloaded video found, using fallback: \(videoPath)")
+            }
+        } else {
+            print("🎬 ❌ AR location data not set, using fallback: \(videoPath)")
+        }
+        
+        let videoEntity = createVideoEntityWithVideoCameraKit(at: position, videoPath: videoPath)
         
         // Track the entity with a unique ID
         let objectId = UUID().uuidString
         placedObjects[objectId] = videoEntity
         
+        // Auto-select video mới nhất cho gesture control
+        setCurrentVideoEntity(videoEntity)
+        
         print("✅ Video placed successfully")
         print("📍 Video world position: \(position)")
         print("🎯 Video entity tracked with ID: \(objectId)")
+        print("🎯 Auto-selected video cho gesture control")
         
         // Switch to minimal tracking after placement (like ContentView.swift)
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
@@ -1806,29 +1974,47 @@ class ARController: NSObject {
     // MARK: - Data Persistence
 
     private func saveObjectData(for mapName: String) {
-   
         var objectsArray: [[String: Any]] = []
 
         for (objectId, objectEntity) in placedObjects {
-            // Get the world position of the entity (not local position)
-            let worldPosition: SIMD3<Float>
-            if let parent = objectEntity.parent as? AnchorEntity {
-                // If entity has an anchor parent, get the anchor's world position
-                worldPosition = parent.position(relativeTo: nil)
-            } else {
-                // Otherwise use entity's position
-                worldPosition = objectEntity.position(relativeTo: nil)
-            }
-            
+            // Lấy thông tin transform đầy đủ từ entity và anchor
             var objectInfo: [String: Any] = [
                 "objectId": objectId,
-                "position": [worldPosition.x, worldPosition.y, worldPosition.z],
-                "scale": objectEntity.transform.scale.x, // Assuming uniform scale
-                "rotation": [objectEntity.transform.rotation.angle, objectEntity.transform.rotation.angle, objectEntity.transform.rotation.angle]
+                "objectType": "video"
             ]
+            
+            // Lấy anchor information nếu có
+            if let anchor = objectEntity.parent as? AnchorEntity {
+                let anchorTransform = anchor.transform
+                let entityTransform = objectEntity.transform
+                
+                // Lưu anchor position (world position)
+                objectInfo["anchorPosition"] = vector3ToArray(anchorTransform.translation)
+                
+                // Lưu anchor rotation (quaternion)
+                objectInfo["anchorRotation"] = quaternionToArray(anchorTransform.rotation)
+                
+                // Lưu entity local position (relative to anchor)
+                objectInfo["localPosition"] = vector3ToArray(entityTransform.translation)
+                
+                // Lưu entity local rotation (quaternion)
+                objectInfo["localRotation"] = quaternionToArray(entityTransform.rotation)
+                
+                // Lưu scale
+                objectInfo["scale"] = vector3ToArray(entityTransform.scale)
+                
+                // Lưu world position (dùng RealityKit's actual world position)
+                let worldPosition = objectEntity.position(relativeTo: nil)
+                objectInfo["worldPosition"] = vector3ToArray(worldPosition)
+            } else {
+                // Fallback cho trường hợp không có anchor
+                let worldPosition = objectEntity.position(relativeTo: nil)
+                objectInfo["worldPosition"] = vector3ToArray(worldPosition)
+                objectInfo["scale"] = vector3ToArray(objectEntity.transform.scale)
+                objectInfo["rotation"] = quaternionToArray(objectEntity.transform.rotation)
+            }
 
-            // Only video objects are supported now
-            objectInfo["objectType"] = "video"
+            // Lưu thông tin video
             let name = objectEntity.name ?? ""
             if !name.isEmpty {
                 objectInfo["content"] = name // store asset path
@@ -1842,11 +2028,10 @@ class ARController: NSObject {
             let objectsURL = worldMapsPath.appendingPathComponent("\(mapName)_objects.json")
             try objectData.write(to: objectsURL)
 
-            print("Successfully saved \(objectsArray.count) objects for map: \(mapName)")
-            print("✅ VideoCameraKit positioning data saved")
-            print("📁 Saved to: \(objectsURL.path)")
+            print("✅ Đã lưu \(objectsArray.count) objects với transform đầy đủ cho map: \(mapName)")
+            print("📁 Lưu tại: \(objectsURL.path)")
         } catch {
-            print("Error saving object data: \(error.localizedDescription)")
+            print("❌ Lỗi khi lưu object data: \(error.localizedDescription)")
         }
     }
 
@@ -1855,7 +2040,7 @@ class ARController: NSObject {
         let objectsURL = worldMapsPath.appendingPathComponent("\(mapName)_objects.json")
 
         guard FileManager.default.fileExists(atPath: objectsURL.path) else {
-            print("No object data found for map: \(mapName)")
+            print("❌ Không tìm thấy object data cho map: \(mapName)")
             return
         }
 
@@ -1864,7 +2049,7 @@ class ARController: NSObject {
             let objectsArray = try JSONSerialization.jsonObject(with: objectData) as? [[String: Any]]
 
             guard let objects = objectsArray else {
-                print("Could not parse object data")
+                print("❌ Không thể parse object data")
                 return
             }
 
@@ -1872,50 +2057,333 @@ class ARController: NSObject {
             placedObjects.removeAll()
             anchors.removeAll()
 
-            // Restore objects from saved data using VideoCameraKit approach
+            // Restore objects từ saved data với transform đầy đủ
             for objectInfo in objects {
-                guard let objectId = objectInfo["objectId"] as? String,
-                      let objectType = objectInfo["objectType"] as? String,
-                      let positionArray = objectInfo["position"] as? [Float],
-                      positionArray.count == 3 else {
+                // Validate transform data
+                guard validateTransformData(objectInfo) else {
+                    print("❌ Invalid transform data for object: \(objectInfo["objectId"] ?? "unknown")")
                     continue
                 }
 
-                // Convert to SIMD3<Float> for anchor transform
-                let position = SIMD3<Float>(positionArray[0], positionArray[1], positionArray[2])
+                let objectId = objectInfo["objectId"] as! String
+                printTransformInfo(objectId, objectInfo)
 
-                // Create video entity using VideoCameraKit approach
+                // Lấy video path
                 let videoPath = objectInfo["content"] as? String ?? "assets/video_(0).mov"
-                print("🔄 Restoring video entity with VideoCameraKit approach: \(videoPath)")
+                print("🔄 Đang restore video entity: \(videoPath)")
                 
-                // Create video entity at the exact saved position
-                let objectEntity = createVideoEntityWithVideoCameraKit(at: position, videoPath: videoPath)
-
-                // Apply saved transformations
-                if let scale = objectInfo["scale"] as? Float {
-                    objectEntity.transform.scale = SIMD3<Float>(scale, scale, scale)
-                }
-
-                if let rotationArray = objectInfo["rotation"] as? [Float], rotationArray.count == 3 {
-                    objectEntity.transform.rotation = simd_quatf(angle: rotationArray[0], axis: [0, 1, 0])
-                }
-
-                // Track entity directly (no separate anchor needed with VideoCameraKit)
+                // Restore transform đầy đủ
+                if let anchorPositionArray = objectInfo["anchorPosition"] as? [Float],
+                   let anchorRotationArray = objectInfo["anchorRotation"] as? [Float],
+                   let localPositionArray = objectInfo["localPosition"] as? [Float],
+                   let localRotationArray = objectInfo["localRotation"] as? [Float],
+                   let scaleArray = objectInfo["scale"] as? [Float],
+                   let anchorPos = arrayToVector3(anchorPositionArray),
+                   let anchorRot = arrayToQuaternion(anchorRotationArray),
+                   let localPos = arrayToVector3(localPositionArray),
+                   let localRot = arrayToQuaternion(localRotationArray),
+                   let scaleVec = arrayToVector3(scaleArray) {
+                    
+                    // Tạo video entity với transform đầy đủ
+                    let (objectEntity, anchor) = createVideoEntityWithFullTransform(
+                        videoPath: videoPath,
+                        anchorPosition: anchorPos,
+                        anchorRotation: anchorRot,
+                        localPosition: localPos,
+                        localRotation: localRot,
+                        scale: scaleVec
+                    )
+                    
+                    // Add anchor to scene
+                    arView?.scene.addAnchor(anchor)
+                    
+                    // Store references
+                    placedObjects[objectId] = objectEntity
+                    anchors[objectId] = anchor
+                    
+                    // Debug: Kiểm tra world position sau khi restore
+                    let actualWorldPos = objectEntity.position(relativeTo: nil)
+                    let savedWorldPos = objectInfo["worldPosition"] as? [Float] ?? [0, 0, 0]
+                    
+                    print("✅ Đã restore object: \(objectId)")
+                    print("📍 Anchor position: \(anchorPos)")
+                    print("🔄 Anchor rotation: \(anchorRot)")
+                    print("📍 Local position: \(objectEntity.transform.translation)")
+                    print("🔄 Local rotation: \(objectEntity.transform.rotation)")
+                    print("📏 Scale: \(objectEntity.transform.scale)")
+                    print("🔍 Saved world position: \(savedWorldPos)")
+                    print("🔍 Actual world position: \(actualWorldPos)")
+                    print("🔍 Position difference: \([actualWorldPos.x - savedWorldPos[0], actualWorldPos.y - savedWorldPos[1], actualWorldPos.z - savedWorldPos[2]])")
+                    
+                    // Option: Force exact world position nếu difference > threshold
+                    let positionDifference = sqrt(
+                        pow(actualWorldPos.x - savedWorldPos[0], 2) +
+                        pow(actualWorldPos.y - savedWorldPos[1], 2) +
+                        pow(actualWorldPos.z - savedWorldPos[2], 2)
+                    )
+                    
+                    if positionDifference > 0.05 { // 5cm threshold
+                        print("⚠️ Position difference lớn (\(positionDifference)m), đang force exact position...")
+                        let targetWorldPos = SIMD3<Float>(savedWorldPos[0], savedWorldPos[1], savedWorldPos[2])
+                        objectEntity.setPosition(targetWorldPos, relativeTo: nil)
+                        print("✅ Đã force set world position to: \(targetWorldPos)")
+                    }
+                    
+                } else if let worldPositionArray = objectInfo["worldPosition"] as? [Float],
+                          let scaleArray = objectInfo["scale"] as? [Float],
+                          let position = arrayToVector3(worldPositionArray),
+                          let scaleVec = arrayToVector3(scaleArray) {
+                    
+                    // Fallback cho trường hợp không có anchor information
+                    // Tạo video entity
+                    let objectEntity = createVideoEntityWithVideoCameraKit(at: SIMD3<Float>(0, 0, 0), videoPath: videoPath)
+                    
+                    // Tạo anchor tại world position
+                    let anchor = AnchorEntity(world: position)
+                    
+                    // Apply scale
+                    objectEntity.transform.scale = scaleVec
+                    
+                    // Apply rotation nếu có
+                    if let rotationArray = objectInfo["rotation"] as? [Float],
+                       let rotation = arrayToQuaternion(rotationArray) {
+                        objectEntity.transform.rotation = rotation
+                    }
+                    
+                    anchor.addChild(objectEntity)
+                    arView?.scene.addAnchor(anchor)
+                    
                 placedObjects[objectId] = objectEntity
+                    anchors[objectId] = anchor
 
-                print("✅ Restored object: \(objectId) at position: \(position)")
-                print("🎯 Using VideoCameraKit for precise positioning")
-                print("🎯 Video should appear at exact saved coordinates")
+                    print("✅ Đã restore object (fallback): \(objectId) tại position: \(position)")
+                }
             }
 
-            print("Successfully loaded \(objects.count) objects for map: \(mapName)")
-            print("✅ All videos positioned using VideoCameraKit approach")
+            print("✅ Đã load thành công \(objects.count) objects cho map: \(mapName)")
+            print("🎯 Tất cả videos đã được restore với transform đầy đủ")
             
-            // Debug world positioning after loading
+            // Debug world positioning sau khi loading
             debugWorldPositioning()
 
         } catch {
-            print("Error loading object data: \(error.localizedDescription)")
+            print("❌ Lỗi khi load object data: \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - Video Entity Creation with Full Transform Support
+    
+    private func createVideoEntityBasic(videoPath: String) -> ModelEntity {
+        // Tạo video entity cơ bản mà không tự động add vào scene
+        guard let videoURL = getFlutterAssetURL(for: videoPath.replacingOccurrences(of: "assets/", with: "")) else {
+            print("❌ Video asset not found: \(videoPath)")
+            return createFallbackVideoEntity()
+        }
+        
+        // Cleanup previous player if exists
+        cleanupVideoResources()
+        
+        let player = AVPlayer(url: videoURL)
+        player.actionAtItemEnd = .none
+        
+        // Store current player for cleanup
+        currentPlayer = player
+        activePlayers.append(player)
+        
+        // Get video dimensions
+        let asset = AVURLAsset(url: videoURL)
+        var dimensions = CGSize(width: 16, height: 9) // Default
+        
+        if let track = asset.tracks(withMediaType: .video).first {
+            dimensions = track.naturalSize
+        }
+        
+        // Dynamic sizing based on aspect ratio
+        let videoRatio = Float(dimensions.width / dimensions.height)
+        let maxDimension: Float = 2.0
+        
+        let width: Float
+        let height: Float
+        
+        if videoRatio > 1.0 {
+            width = maxDimension
+            height = maxDimension / videoRatio
+        } else {
+            height = maxDimension
+            width = maxDimension * videoRatio
+        }
+        
+        let halfWidth = width / 2
+        
+        // Add video looping observer
+        addVideoObserver(for: player)
+        
+        let videoMaterial = VideoMaterial(avPlayer: player)
+        
+        var descriptor = MeshDescriptor(name: "videoPlane")
+        let vertices: [SIMD3<Float>] = [
+            SIMD3<Float>(-halfWidth, 0.0, 0.0),
+            SIMD3<Float>(halfWidth, 0.0, 0.0),
+            SIMD3<Float>(-halfWidth, height, 0.0),
+            SIMD3<Float>(halfWidth, height, 0.0)
+        ]
+        
+        let textureCoords: [SIMD2<Float>] = [
+            SIMD2<Float>(1.0, 0.0),
+            SIMD2<Float>(0.0, 0.0),
+            SIMD2<Float>(1.0, 1.0),
+            SIMD2<Float>(0.0, 1.0)
+        ]
+        
+        descriptor.positions = MeshBuffer(vertices)
+        descriptor.textureCoordinates = MeshBuffer(textureCoords)
+        descriptor.primitives = .triangles([0, 2, 1, 1, 2, 3])
+        
+        do {
+            let videoMesh = try MeshResource.generate(from: [descriptor])
+            let entity = ModelEntity(mesh: videoMesh, materials: [videoMaterial])
+            
+            // Store video path for reference
+            entity.name = videoPath
+            
+            // Start playback
+            player.play()
+            isVideoPlaying = true
+            
+            print("✅ Video entity basic created: \(videoPath)")
+            return entity
+            
+        } catch {
+            print("❌ Error creating basic video entity: \(error)")
+            return createFallbackVideoEntity()
+        }
+    }
+    
+    private func createFallbackVideoEntity() -> ModelEntity {
+        // Simple fallback entity
+        let mesh = MeshResource.generatePlane(width: 2.0, depth: 1.0)
+        let material = SimpleMaterial(color: .gray, isMetallic: false)
+        return ModelEntity(mesh: mesh, materials: [material])
+    }
+    
+    private func createVideoEntityWithFullTransform(
+        videoPath: String,
+        anchorPosition: SIMD3<Float>,
+        anchorRotation: simd_quatf,
+        localPosition: SIMD3<Float>,
+        localRotation: simd_quatf,
+        scale: SIMD3<Float>
+    ) -> (ModelEntity, AnchorEntity) {
+        
+        // Tạo anchor với transform đầy đủ trước
+        let anchor = AnchorEntity(world: anchorPosition)
+        anchor.transform.rotation = anchorRotation
+        
+        // Tạo video entity cơ bản (không add vào scene ngay)
+        let videoEntity = createVideoEntityBasic(videoPath: videoPath)
+        
+        // Apply local transform cho entity
+        videoEntity.transform.translation = localPosition
+        videoEntity.transform.rotation = localRotation
+        videoEntity.transform.scale = scale
+        
+        // Add entity to anchor (quan trọng: anchor đã có đúng position và rotation)
+        anchor.addChild(videoEntity)
+        
+        return (videoEntity, anchor)
+    }
+    
+    // MARK: - Gesture Recognizers for Zoom and Rotate
+    
+    private var currentVideoEntity: ModelEntity?
+    private var rotationGestureRecognizer: UIRotationGestureRecognizer?
+    private var pinchGestureRecognizer: UIPinchGestureRecognizer?
+    private var isGestureControlEnabled = true // Mặc định enable
+    
+    func setupGestureRecognizers(for arView: ARView) {
+        // Remove existing gesture recognizers first
+        if let rotationGR = rotationGestureRecognizer {
+            arView.removeGestureRecognizer(rotationGR)
+        }
+        if let pinchGR = pinchGestureRecognizer {
+            arView.removeGestureRecognizer(pinchGR)
+        }
+        
+        // Setup rotation gesture - exact same as ContentView
+        rotationGestureRecognizer = UIRotationGestureRecognizer(target: self, action: #selector(handleRotation(_:)))
+        arView.addGestureRecognizer(rotationGestureRecognizer!)
+        
+        // Setup pinch gesture for zoom - exact same as ContentView
+        pinchGestureRecognizer = UIPinchGestureRecognizer(target: self, action: #selector(handlePinch(_:)))
+        arView.addGestureRecognizer(pinchGestureRecognizer!)
+        
+        print("✅ Đã setup gesture recognizers giống ContentView cho zoom và rotate")
+    }
+    
+    // Tự động set current video entity khi place object
+    private func setCurrentVideoEntity(_ entity: ModelEntity?) {
+        currentVideoEntity = entity
+        print("🎯 Đã set current video entity: \(entity?.name ?? "nil")")
+    }
+    
+    @objc func handleRotation(_ gesture: UIRotationGestureRecognizer) {
+        // Exact implementation from ContentView.swift
+        guard let entity = currentVideoEntity, gesture.state == .changed else { 
+            if gesture.state == .began {
+                print("🔄 Rotation gesture began - entity: \(currentVideoEntity?.name ?? "nil")")
+            }
+            return 
+        }
+
+        let rotation = Float(-gesture.rotation)
+        entity.orientation *= simd_quatf(angle: rotation, axis: [0, 1, 0])
+        gesture.rotation = 0
+        
+        print("🔄 Đã rotate video (ContentView style): \(entity.name ?? "unknown")")
+    }
+
+    @objc func handlePinch(_ gesture: UIPinchGestureRecognizer) {
+        // Exact implementation from ContentView.swift
+        guard let entity = currentVideoEntity, gesture.state == .changed else { 
+            if gesture.state == .began {
+                print("📏 Pinch gesture began - entity: \(currentVideoEntity?.name ?? "nil")")
+            }
+            return 
+        }
+
+        let scale = Float(gesture.scale)
+        let currentScale = entity.transform.scale
+        let newScale = currentScale * scale
+
+        entity.transform.scale = SIMD3<Float>(repeating: min(max(newScale.x, 0.1), 6.0))
+        gesture.scale = 1
+        
+        print("📏 Đã zoom video (ContentView style): \(entity.name ?? "unknown") scale: \(entity.transform.scale)")
+    }
+    
+    // Tự động select video mới nhất khi place
+    private func autoSelectLatestVideo() {
+        let videoEntities = Array(placedObjects.values)
+        if let lastVideo = videoEntities.last {
+            setCurrentVideoEntity(lastVideo)
+            print("🎯 Tự động select video mới nhất: \(lastVideo.name ?? "unknown")")
+        }
+    }
+    
+    // MARK: - Flutter Method Calls for Gesture Control (Optional)
+    
+    func enableGestureControl(_ enabled: Bool) {
+        isGestureControlEnabled = enabled
+        print("🎮 Gesture control: \(enabled ? "enabled" : "disabled")")
+    }
+    
+    func selectVideoForGestureControl(_ objectId: String) {
+        if let entity = placedObjects[objectId] {
+            setCurrentVideoEntity(entity)
+            print("🎯 Đã select video \(objectId) cho gesture control")
+        } else {
+            setCurrentVideoEntity(nil)
+            print("❌ Không tìm thấy video với ID: \(objectId)")
         }
     }
 }
@@ -2149,6 +2617,8 @@ extension ARController {
                 DispatchQueue.main.async {
                     let activityVC = UIActivityViewController(activityItems: [latestFile], applicationActivities: nil)
                     
+                    self.configurePopoverPresentation(for: activityVC)
+                    
                     if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
                        let window = windowScene.windows.first {
                         window.rootViewController?.present(activityVC, animated: true)
@@ -2234,6 +2704,8 @@ extension ARController {
                     .markupAsPDF
                 ]
                 
+                self.configurePopoverPresentation(for: activityVC)
+                
                 // Present the activity view controller
                 if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
                    let window = windowScene.windows.first {
@@ -2254,6 +2726,21 @@ extension ARController {
         result(exportedMapsPath.path)
     }
     
+    // MARK: - Utility Functions
+    
+    private func configurePopoverPresentation(for activityVC: UIActivityViewController) {
+        // Fix for iPad popover presentation
+        if let popover = activityVC.popoverPresentationController {
+            if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+               let window = windowScene.windows.first,
+               let rootView = window.rootViewController?.view {
+                popover.sourceView = rootView
+                popover.sourceRect = CGRect(x: rootView.bounds.midX, y: rootView.bounds.midY, width: 0, height: 0)
+                popover.permittedArrowDirections = []
+            }
+        }
+    }
+    
     private func openFilesAppDirectly(result: @escaping FlutterResult) {
         // Try to open Files app directly using URL scheme
         if let filesAppURL = URL(string: "shortcuts://run-shortcut?name=Files") {
@@ -2271,6 +2758,8 @@ extension ARController {
                 // Fallback: try to open Files app with a different approach
                 let activityVC = UIActivityViewController(activityItems: ["Exported Maps Directory"], applicationActivities: nil)
                 
+                configurePopoverPresentation(for: activityVC)
+                
                 if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
                    let window = windowScene.windows.first {
                     window.rootViewController?.present(activityVC, animated: true) {
@@ -2282,6 +2771,159 @@ extension ARController {
             }
         } else {
             result(FlutterError(code: "URL_ERROR", message: "Invalid Files app URL", details: nil))
+        }
+    }
+}
+
+// MARK: - Transform Extensions
+
+extension ARController {
+    
+    // MARK: - Transform Utilities
+    
+    /// Convert quaternion to array for JSON serialization
+    private func quaternionToArray(_ quat: simd_quatf) -> [Float] {
+        return [quat.vector.x, quat.vector.y, quat.vector.z, quat.vector.w]
+    }
+    
+    /// Convert array to quaternion for JSON deserialization
+    private func arrayToQuaternion(_ array: [Float]) -> simd_quatf? {
+        guard array.count == 4 else { return nil }
+        return simd_quatf(vector: SIMD4<Float>(array[0], array[1], array[2], array[3]))
+    }
+    
+    /// Convert SIMD3 to array for JSON serialization
+    private func vector3ToArray(_ vector: SIMD3<Float>) -> [Float] {
+        return [vector.x, vector.y, vector.z]
+    }
+    
+    /// Convert array to SIMD3 for JSON deserialization
+    private func arrayToVector3(_ array: [Float]) -> SIMD3<Float>? {
+        guard array.count == 3 else { return nil }
+        return SIMD3<Float>(array[0], array[1], array[2])
+    }
+    
+    /// Calculate world position from anchor and local position
+    private func calculateWorldPosition(anchorPosition: SIMD3<Float>, localPosition: SIMD3<Float>) -> SIMD3<Float> {
+        return anchorPosition + localPosition
+    }
+    
+    /// Validate transform data
+    private func validateTransformData(_ data: [String: Any]) -> Bool {
+        // Check required fields
+        guard let objectId = data["objectId"] as? String,
+              let objectType = data["objectType"] as? String,
+              objectType == "video" else {
+            return false
+        }
+        
+        // Check if we have anchor-based transform or fallback transform
+        if let anchorPosition = data["anchorPosition"] as? [Float],
+           let anchorRotation = data["anchorRotation"] as? [Float],
+           let localPosition = data["localPosition"] as? [Float],
+           let localRotation = data["localRotation"] as? [Float],
+           let scale = data["scale"] as? [Float] {
+            
+            return anchorPosition.count == 3 &&
+                   anchorRotation.count == 4 &&
+                   localPosition.count == 3 &&
+                   localRotation.count == 4 &&
+                   scale.count == 3
+        }
+        
+        // Fallback validation
+        if let worldPosition = data["worldPosition"] as? [Float],
+           let scale = data["scale"] as? [Float] {
+            return worldPosition.count == 3 && scale.count == 3
+        }
+        
+        return false
+    }
+    
+    // MARK: - Downloaded Video Management
+    
+    func setARLocationData(culturalSiteId: Int, arLocationId: Int) {
+        self.currentCulturalSiteId = culturalSiteId
+        self.currentArLocationId = arLocationId
+        print("🎯 AR Location data set: culturalSiteId=\(culturalSiteId), arLocationId=\(arLocationId)")
+    }
+    
+    private func getDownloadedVideoURL(for culturalSiteId: Int, arLocationId: Int) -> URL? {
+        print("🔍 getDownloadedVideoURL called with culturalSiteId=\(culturalSiteId), arLocationId=\(arLocationId)")
+        
+        // Get path to downloaded videos directory
+        guard let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
+            print("❌ Could not get documents directory")
+            return nil
+        }
+        
+        let videoDir = documentsPath.appendingPathComponent("videos/\(culturalSiteId)/\(arLocationId)")
+        print("🔍 Looking for videos in directory: \(videoDir.path)")
+        
+        // Check if directory exists
+        guard FileManager.default.fileExists(atPath: videoDir.path) else {
+            print("❌ Video directory not found: \(videoDir.path)")
+            return nil
+        }
+        
+        do {
+            // Get list of video files in directory
+            let videoFiles = try FileManager.default.contentsOfDirectory(atPath: videoDir.path)
+                .filter { $0.hasSuffix(".mp4") || $0.hasSuffix(".mov") }
+                .sorted() // Sort to get consistent order
+            
+            guard let firstVideo = videoFiles.first else {
+                print("❌ No video files found in directory: \(videoDir.path)")
+                return nil
+            }
+            
+            let videoURL = videoDir.appendingPathComponent(firstVideo)
+            
+            // Verify file exists
+            guard FileManager.default.fileExists(atPath: videoURL.path) else {
+                print("❌ Video file not found: \(videoURL.path)")
+                return nil
+            }
+            
+            print("✅ Found downloaded video: \(videoURL.path)")
+            return videoURL
+            
+        } catch {
+            print("❌ Error reading video directory: \(error)")
+            return nil
+        }
+    }
+
+    /// Print transform information for debugging
+    private func printTransformInfo(_ objectId: String, _ data: [String: Any]) {
+        print("🔍 Transform Info for \(objectId):")
+        
+        if let anchorPosition = data["anchorPosition"] as? [Float] {
+            print("   📍 Anchor Position: \(anchorPosition)")
+        }
+        
+        if let anchorRotation = data["anchorRotation"] as? [Float] {
+            print("   🔄 Anchor Rotation: \(anchorRotation)")
+        }
+        
+        if let localPosition = data["localPosition"] as? [Float] {
+            print("   📍 Local Position: \(localPosition)")
+        }
+        
+        if let localRotation = data["localRotation"] as? [Float] {
+            print("   🔄 Local Rotation: \(localRotation)")
+        }
+        
+        if let scale = data["scale"] as? [Float] {
+            print("   📏 Scale: \(scale)")
+        }
+        
+        if let worldPosition = data["worldPosition"] as? [Float] {
+            print("   📍 World Position: \(worldPosition)")
+        }
+        
+        if let content = data["content"] as? String {
+            print("   🎬 Content: \(content)")
         }
     }
 }

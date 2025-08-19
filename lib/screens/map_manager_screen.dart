@@ -437,6 +437,7 @@ class _MapManagerScreenState extends State<MapManagerScreen> {
       // Check if map exists first
       final availableMaps = await _arService.getAvailableMaps();
       if (!availableMaps.contains(mapName)) {
+        if (!mounted) return;
         Navigator.pop(context); // Close loading dialog
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -458,13 +459,15 @@ class _MapManagerScreenState extends State<MapManagerScreen> {
         Map<String, dynamic>? fileInfo = await _arService.getExportFileInfo(
           mapName,
         );
+        print("🔍 Debug: File info: $fileInfo");
         if (fileInfo != null) {
           print("📊 File size: ${fileInfo['formattedSize']}");
-
+          if (!mounted) return;
           // Show success dialog
           Navigator.pop(context); // Close loading dialog
           _showExportSuccessDialog(mapName, fileInfo);
         } else {
+          if (!mounted) return;
           Navigator.pop(context); // Close loading dialog
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
@@ -474,6 +477,7 @@ class _MapManagerScreenState extends State<MapManagerScreen> {
           );
         }
       } else {
+        if (!mounted) return;
         Navigator.pop(context); // Close loading dialog
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
