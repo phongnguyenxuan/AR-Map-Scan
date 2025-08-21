@@ -43,6 +43,7 @@ ArLocation _$ArLocationFromJson(Map<String, dynamic> json) => ArLocation(
   children: (json['children'] as List<dynamic>?)
       ?.map((e) => ArLocation.fromJson(e as Map<String, dynamic>))
       .toList(),
+  isActive: json['isActive'] as bool?,
 );
 
 Map<String, dynamic> _$ArLocationToJson(
@@ -64,6 +65,7 @@ Map<String, dynamic> _$ArLocationToJson(
       ?.map((e) => e.toJson())
       .toList(),
   'children': instance.children?.map((e) => e.toJson()).toList(),
+  'isActive': instance.isActive,
 };
 
 Coordinates _$CoordinatesFromJson(Map<String, dynamic> json) => Coordinates(

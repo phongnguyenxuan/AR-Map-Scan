@@ -3,6 +3,7 @@ import ARKit
 import RealityKit
 import Flutter
 import AVFoundation
+import Darwin
 
 class ARController: NSObject {
     static let shared = ARController()
@@ -67,7 +68,8 @@ class ARController: NSObject {
     }
     
     deinit {
-        cleanupVideoResources()
+        print("🗑️ ARController deinit called")
+        disposeARResources()
     }
     
     // MARK: - App Lifecycle Management
@@ -90,6 +92,8 @@ class ARController: NSObject {
     }
     
     func cleanupOnBackground() {
+        print("🔋 Starting background cleanup...")
+        
         // Pause video to save battery and memory
         pauseVideoPlayback()
         
@@ -99,7 +103,34 @@ class ARController: NSObject {
         // Clear video cache
         URLCache.shared.removeAllCachedResponses()
         
-        print("🔋 Cleaned up resources for background")
+        // Force cleanup video resources
+        cleanupVideoResources()
+        
+        // Pause AR session to save battery
+        arSession?.pause()
+        
+        print("🔋 Background cleanup completed")
+    }
+    
+    func resumeFromBackground() {
+        print("🔄 Resuming from background...")
+        
+        // Resume AR session
+        if let arView = self.arView {
+            let configuration = ARWorldTrackingConfiguration()
+            configuration.planeDetection = .horizontal
+            arSession?.run(configuration)
+        }
+        
+        // Resume video playback if needed
+        if isVideoPlaying {
+            resumeVideoPlayback()
+        }
+        
+        // Resume status updates
+        startStatusUpdates()
+        
+        print("🔄 Resume from background completed")
     }
     
     func disposeARResources() {
@@ -110,8 +141,9 @@ class ARController: NSObject {
         
         // Stop AR session
         arSession?.pause()
+        arSession?.delegate = nil // Important: Remove delegate reference
         
-        // Cleanup video resources
+        // Cleanup video resources FIRST
         cleanupVideoResources()
         
         // Remove all placed objects
@@ -136,10 +168,10 @@ class ARController: NSObject {
         // Clear video nodes
         videoNodes.removeAll()
         
-        // Clear video observers
+        // Clear video observers (should already be cleared by cleanupVideoResources)
         videoObservers.removeAll()
         
-        // Clear active players
+        // Clear active players (should already be cleared by cleanupVideoResources)
         activePlayers.removeAll()
         currentPlayer = nil
         
@@ -149,6 +181,13 @@ class ARController: NSObject {
         
         // Set AR controller as inactive
         isARControllerActive = false
+        
+        // Clear AR view reference
+        arView = nil
+        arSession = nil
+        
+        // Force memory cleanup
+        forceMemoryCleanup()
         
         print("✅ AR resources disposed successfully")
     }
@@ -368,6 +407,18 @@ class ARController: NSObject {
         case "disposeARResources":
             disposeARResources()
             result(true)
+        case "forceMemoryCleanup":
+            forceMemoryCleanup()
+            result(true)
+        case "cleanupOnBackground":
+            cleanupOnBackground()
+            result(true)
+        case "resumeFromBackground":
+            resumeFromBackground()
+            result(true)
+        case "logMemoryUsage":
+            logMemoryUsage()
+            result(true)
         case "openExportedMapsInFiles":
             openExportedMapsInFiles(result: result)
         case "getExportedMapsDirectory":
@@ -407,8 +458,8 @@ class ARController: NSObject {
         let pos = transform.columns.3
         let position = SIMD3<Float>(pos.x, pos.y, pos.z)
         
-        // Try to use downloaded video first, fallback to provided path or default
-        var videoPath = args["videoPath"] as? String ?? "assets/video_(0).mov"
+        // Get video path from arguments or use downloaded video
+        var videoPath = args["videoPath"] as? String
         
         print("🔍 DEBUG spawnNode - Current AR location data:")
         print("   culturalSiteId: \(currentCulturalSiteId?.description ?? "nil")")
@@ -423,10 +474,17 @@ class ARController: NSObject {
                 videoPath = downloadedVideoURL.path
                 print("🎬 ✅ Using downloaded video: \(videoPath)")
             } else {
-                print("🎬 ❌ No downloaded video found, using fallback: \(videoPath)")
+                print("🎬 ❌ No downloaded video found")
+                return // Don't create video entity if no downloaded video
             }
         } else {
-            print("🎬 ❌ AR location data not set, using fallback: \(videoPath)")
+            print("🎬 ❌ AR location data not set")
+            return // Don't create video entity if no AR location data
+        }
+        
+        guard let videoPath = videoPath else {
+            print("❌ No video path available")
+            return
         }
         
         let objectEntity = self.createVideoEntity(at: position, videoPath: videoPath)
@@ -967,23 +1025,15 @@ class ARController: NSObject {
     // MARK: - Enhanced Video Entity Creation (RealityKit-style)
     
     private func createVideoEntity(at position: SIMD3<Float>, videoPath: String) -> ModelEntity {
-        let videoURL: URL
+        let videoURL = URL(fileURLWithPath: videoPath)
         
-        // Check if this is a local file path or Flutter asset path
-        if videoPath.hasPrefix("/") {
-            // Local file path - create file URL directly
-            videoURL = URL(fileURLWithPath: videoPath)
-            print("🎬 Using local video file: \(videoPath)")
-        } else {
-            // Flutter asset path - use existing asset loading logic
-            let videoFileName = videoPath.replacingOccurrences(of: "assets/", with: "")
-            guard let assetURL = getFlutterAssetURL(for: videoFileName) else {
-                print("❌ Video asset not found: \(videoPath)")
-                return createFallbackVideoEntity(at: position)
-            }
-            videoURL = assetURL
-            print("🎬 Using Flutter asset: \(videoPath)")
+        // Check if file exists
+        guard FileManager.default.fileExists(atPath: videoPath) else {
+            print("❌ Video file not found: \(videoPath)")
+            return createFallbackVideoEntity(at: position)
         }
+        
+        print("🎬 Using local video file: \(videoPath)")
         
         // Create player - match ContentView.swift approach exactly
         print("🎬 Creating AVPlayer with URL: \(videoURL)")
@@ -991,34 +1041,51 @@ class ARController: NSObject {
         // Cleanup previous player if exists
         cleanupVideoResources()
         
+        // Create player with proper error handling
         let player = AVPlayer(url: videoURL)
+        
         player.actionAtItemEnd = .none
         
         // Store current player for cleanup
         currentPlayer = player
         activePlayers.append(player)
         
-        // Get video dimensions with memory optimization
+        // Get video dimensions with memory optimization and error handling
         let asset = AVURLAsset(url: videoURL, options: [
             AVURLAssetPreferPreciseDurationAndTimingKey: false
         ])
         var dimensions = CGSize(width: 16, height: 9) // Default
         
-        // Try to get actual video dimensions with timeout
+        // Try to get actual video dimensions with timeout and error handling
         let semaphore = DispatchSemaphore(value: 0)
+        var loadError: Error?
+        
         asset.loadValuesAsynchronously(forKeys: ["tracks"]) {
             defer { semaphore.signal() }
             
-            if let track = asset.tracks(withMediaType: .video).first {
-                dimensions = track.naturalSize
-                print("📐 Video dimensions: \(dimensions)")
-            } else {
-                print("⚠️ Could not get video track, using default dimensions")
+            do {
+                if let track = asset.tracks(withMediaType: .video).first {
+                    dimensions = track.naturalSize
+                    print("📐 Video dimensions: \(dimensions)")
+                } else {
+                    print("⚠️ Could not get video track, using default dimensions")
+                }
+            } catch {
+                loadError = error
+                print("❌ Error loading video tracks: \(error)")
             }
         }
         
         // Wait for dimensions with timeout (max 1 second for better performance)
-        _ = semaphore.wait(timeout: .now() + 1.0)
+        let result = semaphore.wait(timeout: .now() + 1.0)
+        if result == .timedOut {
+            print("⚠️ Timeout getting video dimensions, using defaults")
+        }
+        
+        if let error = loadError {
+            print("❌ Failed to load video asset: \(error)")
+            // Don't return here, continue with default dimensions
+        }
         
         // Dynamic sizing based on aspect ratio with performance optimization
         let videoRatio = Float(dimensions.width / dimensions.height)
@@ -1097,7 +1164,7 @@ class ARController: NSObject {
             // Store video path for reference
             entity.name = videoPath
             
-            // Start playback with memory optimization
+            // Start playback with memory optimization and error handling
             print("▶️ Starting video playback")
             player.play()
             isVideoPlaying = true
@@ -1108,36 +1175,46 @@ class ARController: NSObject {
             // Optimize video playback settings
             player.automaticallyWaitsToMinimizeStalling = false
             
-                    print("✅ Optimized video entity created at position: \(position) with aspect ratio: \(videoRatio)")
-        print("📹 Video dimensions: \(dimensions), calculated size: \(width)x\(height)")
-        print("🔗 Anchor created with ID: \(objectId)")
-        print("📦 Video entity stored in placedObjects")
-        print("🎬 Video playback started with memory optimization")
-        print("🎯 Video URL: \(videoURL)")
-        print("⚡ Performance optimizations applied")
-        print("🔋 Battery and memory optimized")
-        print("🎯 VideoMaterial optimized for RealityKit")
+            print("✅ Optimized video entity created at position: \(position) with aspect ratio: \(videoRatio)")
+            print("📹 Video dimensions: \(dimensions), calculated size: \(width)x\(height)")
+            print("🔗 Anchor created with ID: \(objectId)")
+            print("📦 Video entity stored in placedObjects")
+            print("🎬 Video playback started with memory optimization")
+            print("🎯 Video URL: \(videoURL)")
+            print("⚡ Performance optimizations applied")
+            print("🔋 Battery and memory optimized")
+            print("🎯 VideoMaterial optimized for RealityKit")
             
             return entity
             
         } catch {
             print("❌ Error creating video entity: \(error)")
             print("🔍 Error details: \(error.localizedDescription)")
+            
+            // Cleanup on error
+            cleanupVideoResources()
+            
             return createFallbackVideoEntity(at: position)
         }
     }
     
     private func createFallbackVideoEntity(at position: SIMD3<Float>) -> ModelEntity {
-        // Fallback to original method if video loading fails
-        print("🔄 Using fallback video entity")
-        let fallbackEntity = createVideoEntity(at: position, videoPath: "assets/video_(0).mov")
-        return fallbackEntity
+        // Create a simple placeholder entity when video loading fails
+        print("🔄 Creating placeholder video entity")
+        let mesh = MeshResource.generatePlane(width: 2.0, depth: 1.0)
+        let material = SimpleMaterial(color: .gray, isMetallic: false)
+        let entity = ModelEntity(mesh: mesh, materials: [material])
+        entity.name = "placeholder"
+        return entity
     }
     
     private func createVideoEntityWithoutAnchor(videoPath: String) -> ModelEntity {
         // Create video entity without anchor for restoration purposes
-        guard let videoURL = getFlutterAssetURL(for: videoPath.replacingOccurrences(of: "assets/", with: "")) else {
-            print("❌ Video asset not found: \(videoPath)")
+        let videoURL = URL(fileURLWithPath: videoPath)
+        
+        // Check if file exists
+        guard FileManager.default.fileExists(atPath: videoPath) else {
+            print("❌ Video file not found: \(videoPath)")
             return createFallbackVideoEntityWithoutAnchor()
         }
         
@@ -1261,29 +1338,28 @@ class ARController: NSObject {
     }
     
     private func createFallbackVideoEntityWithoutAnchor() -> ModelEntity {
-        // Fallback to create a simple video entity without anchor
-        print("🔄 Using fallback video entity without anchor")
-        return createVideoEntityWithoutAnchor(videoPath: "assets/video_(0).mov")
+        // Create a simple placeholder entity without anchor
+        print("🔄 Creating placeholder video entity without anchor")
+        let mesh = MeshResource.generatePlane(width: 2.0, depth: 1.0)
+        let material = SimpleMaterial(color: .gray, isMetallic: false)
+        let entity = ModelEntity(mesh: mesh, materials: [material])
+        entity.name = "placeholder"
+        return entity
     }
     
     // MARK: - VideoCameraKit Approach (Original Working Version)
     
     private func createVideoEntityWithVideoCameraKit(at position: SIMD3<Float>, videoPath: String) -> ModelEntity {
         // Create video entity using VideoCameraKit approach for precise positioning
-        let videoURL: URL
-        if videoPath.hasPrefix("/") {
-            // Local file path
-            videoURL = URL(fileURLWithPath: videoPath)
-            print("🎬 Using local video file: \(videoPath)")
-        } else {
-            // Flutter asset path
-            guard let assetURL = getFlutterAssetURL(for: videoPath.replacingOccurrences(of: "assets/", with: "")) else {
-                print("❌ Video asset not found: \(videoPath)")
-                return createFallbackVideoEntityWithVideoCameraKit(at: position)
-            }
-            videoURL = assetURL
-            print("🎬 Using Flutter asset: \(videoPath)")
+        let videoURL = URL(fileURLWithPath: videoPath)
+        
+        // Check if file exists
+        guard FileManager.default.fileExists(atPath: videoPath) else {
+            print("❌ Video file not found: \(videoPath)")
+            return createFallbackVideoEntityWithVideoCameraKit(at: position)
         }
+        
+        print("🎬 Using local video file: \(videoPath)")
         
         // Create player with VideoCameraKit optimization
         print("🎬 Creating AVPlayer with VideoCameraKit approach: \(videoURL)")
@@ -1410,9 +1486,13 @@ class ARController: NSObject {
     }
     
     private func createFallbackVideoEntityWithVideoCameraKit(at position: SIMD3<Float>) -> ModelEntity {
-        // Fallback to create a simple video entity with VideoCameraKit approach
-        print("🔄 Using fallback VideoCameraKit video entity")
-        return createVideoEntityWithVideoCameraKit(at: position, videoPath: "assets/video_(0).mov")
+        // Create a simple placeholder entity with VideoCameraKit approach
+        print("🔄 Creating placeholder VideoCameraKit video entity")
+        let mesh = MeshResource.generatePlane(width: 2.0, depth: 1.0)
+        let material = SimpleMaterial(color: .gray, isMetallic: false)
+        let entity = ModelEntity(mesh: mesh, materials: [material])
+        entity.name = "placeholder"
+        return entity
     }
     
     // MARK: - Debug World Positioning
@@ -1755,33 +1835,65 @@ class ARController: NSObject {
     // MARK: - Memory Management
     
     private func cleanupVideoResources() {
-        // Stop and cleanup current player
-        currentPlayer?.pause()
-        currentPlayer = nil
+        print("🧹 Starting video resources cleanup...")
         
-        // Remove all observers
+        // Stop and cleanup current player FIRST
+        if let player = currentPlayer {
+            player.pause()
+            player.replaceCurrentItem(with: nil) // Important: Clear current item
+            currentPlayer = nil
+            print("✅ Current player cleaned up")
+        }
+        
+        // Remove all observers BEFORE clearing arrays
+        print("👁️ Removing \(videoObservers.count) video observers...")
         for observer in videoObservers {
             NotificationCenter.default.removeObserver(observer)
         }
         videoObservers.removeAll()
+        print("✅ All video observers removed")
         
-        // Clear active players
+        // Clear active players with proper cleanup
+        print("🎬 Cleaning up \(activePlayers.count) active players...")
         for player in activePlayers {
             player.pause()
+            player.replaceCurrentItem(with: nil) // Important: Clear current item
         }
         activePlayers.removeAll()
+        print("✅ All active players cleaned up")
         
+        // Reset state
         isVideoPlaying = false
-        print("🧹 Cleaned up video resources")
-        print("👁️ Removed \(videoObservers.count) video observers")
+        
+        // Force garbage collection hint
+        autoreleasepool {
+            // This helps release memory immediately
+        }
+        
+        print("🧹 Video resources cleanup completed")
     }
     
     private func addVideoObserver(for player: AVPlayer) {
+        // Ensure we have a valid player item
+        guard let playerItem = player.currentItem else {
+            print("⚠️ Cannot add observer - player has no current item")
+            return
+        }
+        
         let observer = NotificationCenter.default.addObserver(
             forName: .AVPlayerItemDidPlayToEndTime,
-            object: player.currentItem,
+            object: playerItem, // Use playerItem instead of player.currentItem
             queue: .main) { [weak self, weak player] _ in
-                guard let self = self, let player = player else { return }
+                guard let self = self, let player = player else { 
+                    print("⚠️ Video observer callback - self or player is nil")
+                    return 
+                }
+                
+                // Check if player is still valid
+                guard player.currentItem != nil else {
+                    print("⚠️ Video observer callback - player has no current item")
+                    return
+                }
                 
                 print("🔄 Video ended - looping back to start")
                 player.seek(to: .zero)
@@ -1790,51 +1902,10 @@ class ARController: NSObject {
         }
         
         videoObservers.append(observer)
-        print("👁️ Added video loop observer")
+        print("👁️ Added video loop observer for player: \(player)")
     }
     
     // MARK: - Helper Methods
-    
-    private func getFlutterAssetURL(for fileName: String) -> URL? {
-        // Try multiple possible Flutter assets paths
-        let possiblePaths = [
-            Bundle.main.path(forResource: "Frameworks/App.framework/flutter_assets", ofType: nil),
-            Bundle.main.path(forResource: "flutter_assets", ofType: nil),
-            Bundle.main.path(forResource: "App.framework/flutter_assets", ofType: nil)
-        ]
-        
-        var flutterAssetsPath: String?
-        for path in possiblePaths {
-            if let path = path, FileManager.default.fileExists(atPath: path) {
-                flutterAssetsPath = path
-                print("✅ Found Flutter assets at: \(path)")
-                break
-            }
-        }
-        
-        guard let flutterAssetsPath = flutterAssetsPath else {
-            print("❌ Flutter assets path not found")
-            return nil
-        }
-        
-        // Construct the full path to the video file
-        let videoPath = "\(flutterAssetsPath)/assets/\(fileName)"
-        let videoURL = URL(fileURLWithPath: videoPath)
-        
-        // Check if file exists
-        guard FileManager.default.fileExists(atPath: videoPath) else {
-            print("❌ Video file not found at path: \(videoPath)")
-            // Try to list files in assets directory for debugging
-            let assetsDir = "\(flutterAssetsPath)/assets"
-            if let files = try? FileManager.default.contentsOfDirectory(atPath: assetsDir) {
-                print("📁 Available files in assets: \(files)")
-            }
-            return nil
-        }
-        
-        print("✅ Found video at: \(videoPath)")
-        return videoURL
-    }
     
     private func removeAllPlacedObjects() {
         // Cleanup video resources first
@@ -1884,8 +1955,8 @@ class ARController: NSObject {
         // Create video entity using VideoCameraKit approach with downloaded video logic
         print("🎯 Creating video entity with VideoCameraKit approach")
         
-        // Try to use downloaded video first, fallback to default
-        var videoPath = "assets/video_(0).mov"
+        // Get downloaded video path
+        var videoPath: String?
         
         print("🔍 DEBUG handleTap - Current AR location data:")
         print("   culturalSiteId: \(currentCulturalSiteId?.description ?? "nil")")
@@ -1900,10 +1971,17 @@ class ARController: NSObject {
                 videoPath = downloadedVideoURL.path
                 print("🎬 ✅ Using downloaded video: \(videoPath)")
             } else {
-                print("🎬 ❌ No downloaded video found, using fallback: \(videoPath)")
+                print("🎬 ❌ No downloaded video found")
+                return // Don't create video entity if no downloaded video
             }
         } else {
-            print("🎬 ❌ AR location data not set, using fallback: \(videoPath)")
+            print("🎬 ❌ AR location data not set")
+            return // Don't create video entity if no AR location data
+        }
+        
+        guard let videoPath = videoPath else {
+            print("❌ No video path available")
+            return
         }
         
         let videoEntity = createVideoEntityWithVideoCameraKit(at: position, videoPath: videoPath)
@@ -2068,8 +2146,28 @@ class ARController: NSObject {
                 let objectId = objectInfo["objectId"] as! String
                 printTransformInfo(objectId, objectInfo)
 
-                // Lấy video path
-                let videoPath = objectInfo["content"] as? String ?? "assets/video_(0).mov"
+                // Lấy video path từ downloaded video
+                var videoPath: String?
+                if let culturalSiteId = currentCulturalSiteId,
+                   let arLocationId = currentArLocationId {
+                    print("🔍 Searching for downloaded video: culturalSiteId=\(culturalSiteId), arLocationId=\(arLocationId)")
+                    
+                    if let downloadedVideoURL = getDownloadedVideoURL(for: culturalSiteId, arLocationId: arLocationId) {
+                        videoPath = downloadedVideoURL.path
+                        print("🎬 ✅ Using downloaded video: \(videoPath)")
+                    } else {
+                        print("🎬 ❌ No downloaded video found")
+                        continue // Skip this object if no downloaded video
+                    }
+                } else {
+                    print("🎬 ❌ AR location data not set")
+                    continue // Skip this object if no AR location data
+                }
+                guard let videoPath = videoPath else {
+                    print("❌ No video path available for object: \(objectId)")
+                    continue
+                }
+                
                 print("🔄 Đang restore video entity: \(videoPath)")
                 
                 // Restore transform đầy đủ
@@ -2175,8 +2273,11 @@ class ARController: NSObject {
     
     private func createVideoEntityBasic(videoPath: String) -> ModelEntity {
         // Tạo video entity cơ bản mà không tự động add vào scene
-        guard let videoURL = getFlutterAssetURL(for: videoPath.replacingOccurrences(of: "assets/", with: "")) else {
-            print("❌ Video asset not found: \(videoPath)")
+        let videoURL = URL(fileURLWithPath: videoPath)
+        
+        // Check if file exists
+        guard FileManager.default.fileExists(atPath: videoPath) else {
+            print("❌ Video file not found: \(videoPath)")
             return createFallbackVideoEntity()
         }
         
@@ -2260,10 +2361,12 @@ class ARController: NSObject {
     }
     
     private func createFallbackVideoEntity() -> ModelEntity {
-        // Simple fallback entity
+        // Simple placeholder entity
         let mesh = MeshResource.generatePlane(width: 2.0, depth: 1.0)
         let material = SimpleMaterial(color: .gray, isMetallic: false)
-        return ModelEntity(mesh: mesh, materials: [material])
+        let entity = ModelEntity(mesh: mesh, materials: [material])
+        entity.name = "placeholder"
+        return entity
     }
     
     private func createVideoEntityWithFullTransform(
@@ -2386,6 +2489,57 @@ class ARController: NSObject {
             print("❌ Không tìm thấy video với ID: \(objectId)")
         }
     }
+
+    // MARK: - Memory Management
+    
+    private func logMemoryUsage() {
+        var info = mach_task_basic_info()
+        var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size)/4
+        
+        let kerr: kern_return_t = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: 1) {
+                task_info(mach_task_self_,
+                         task_flavor_t(MACH_TASK_BASIC_INFO),
+                         $0,
+                         &count)
+            }
+        }
+        
+        if kerr == KERN_SUCCESS {
+            let memoryMB = info.resident_size / 1024 / 1024
+            print("📊 Memory usage: \(memoryMB) MB")
+            
+            // Log additional memory info
+            print("📊 Active players: \(activePlayers.count)")
+            print("📊 Video observers: \(videoObservers.count)")
+            print("📊 Placed objects: \(placedObjects.count)")
+            print("📊 Anchors: \(anchors.count)")
+        } else {
+            print("❌ Failed to get memory info")
+        }
+    }
+    
+    private func forceMemoryCleanup() {
+        print("🧹 Force memory cleanup...")
+        
+        // Force cleanup video resources
+        cleanupVideoResources()
+        
+        // Clear all caches
+        URLCache.shared.removeAllCachedResponses()
+        
+        // Force garbage collection hint
+        autoreleasepool {
+            // This helps release memory immediately
+        }
+        
+        // Clear any remaining references
+        videoNodes.removeAll()
+        placedObjects.removeAll()
+        anchors.removeAll()
+        
+        print("🧹 Force memory cleanup completed")
+    }
 }
 
 // MARK: - RealityKit doesn't need ARSCNViewDelegate as it handles anchoring automatically
@@ -2395,17 +2549,37 @@ class ARController: NSObject {
 extension ARController: ARSessionDelegate {
     func session(_ session: ARSession, didFailWithError error: Error) {
         print("AR Session failed: \(error.localizedDescription)")
+        
+        // Cleanup on session failure to prevent memory issues
+        DispatchQueue.main.async { [weak self] in
+            self?.cleanupVideoResources()
+        }
     }
 
     func sessionWasInterrupted(_ session: ARSession) {
         print("AR Session was interrupted")
+        
+        // Pause video playback during interruption
+        DispatchQueue.main.async { [weak self] in
+            self?.pauseVideoPlayback()
+        }
     }
 
     func sessionInterruptionEnded(_ session: ARSession) {
         print("AR Session interruption ended")
+        
+        // Resume video playback after interruption
+        DispatchQueue.main.async { [weak self] in
+            self?.resumeVideoPlayback()
+        }
     }
 
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
+        // Only update if AR controller is still active
+        guard isARControllerActive else {
+            return
+        }
+        
         // Update world mapping status display
         updateWorldMappingStatus(frame)
         
@@ -2419,9 +2593,10 @@ extension ARController: ARSessionDelegate {
             isRelocalizingMap = false
             pendingMapNameToLoadObjects = nil
             
-            // Load objects after successful relocalization
+            // Load objects after successful relocalization with weak reference
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                self?.loadObjectData(for: mapName)
+                guard let self = self else { return }
+                self.loadObjectData(for: mapName)
             }
         }
     }

@@ -26,7 +26,7 @@ class ArLocation {
   final CulturalSite? culturalSite;
   final List<ArLocationVideo>? arLocationVideos;
   final List<ArLocation>? children;
-
+  final bool? isActive;
   ArLocation({
     this.id,
     this.type,
@@ -40,6 +40,7 @@ class ArLocation {
     this.culturalSite,
     this.arLocationVideos,
     this.children,
+    this.isActive,
   });
 
   factory ArLocation.fromJson(Map<String, dynamic> json) =>

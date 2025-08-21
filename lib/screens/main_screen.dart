@@ -1,10 +1,11 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_application_ar/config/initialize_dependencies.dart';
 import 'package:flutter_application_ar/models/ar_location_model.dart';
+import 'package:flutter_application_ar/network/api_source.dart';
 import 'package:flutter_application_ar/services/ar_service.dart';
 
 class MainScreen extends StatefulWidget {
-  final ArData arLocation;
-  const MainScreen({super.key, required this.arLocation});
+  const MainScreen({super.key});
 
   @override
   State<MainScreen> createState() => _MainScreenState();
@@ -70,7 +71,6 @@ class _MainScreenState extends State<MainScreen> {
                     Text('Status: $_arStatus'),
                     Text('Objects: $_objectCount'),
                     Text('Maps: $_mapCount'),
-                    Text('Ar Location: ${widget.arLocation.items?.length}'),
                   ],
                 ),
               ),

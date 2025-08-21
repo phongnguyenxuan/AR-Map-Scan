@@ -185,6 +185,9 @@ class _ListArLocationScreenState extends State<ListArLocationScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final activeLocations = _arLocation?.items
+        ?.where((element) => element.isActive == true)
+        .toList();
     return Scaffold(
       appBar: AppBar(
         title: const Text('List AR Location'),
@@ -194,11 +197,11 @@ class _ListArLocationScreenState extends State<ListArLocationScreen> {
       body: _isLoading
           ? const Center(child: CircularProgressIndicator())
           : ListView.builder(
-              itemCount: _arLocation?.items?.length ?? 0,
+              itemCount: activeLocations?.length ?? 0,
               itemBuilder: (context, index) {
                 final culturalSiteId =
-                    _arLocation?.items?[index].culturalSite?.id ?? 0;
-                final arLocationId = _arLocation?.items?[index].id ?? 0;
+                    activeLocations?[index].culturalSite?.id ?? 0;
+                final arLocationId = activeLocations?[index].id ?? 0;
                 final locationKey = _getLocationKey(
                   culturalSiteId,
                   arLocationId,
@@ -291,8 +294,7 @@ class _ListArLocationScreenState extends State<ListArLocationScreen> {
                               ClipRRect(
                                 borderRadius: BorderRadius.circular(8),
                                 child: Image.network(
-                                  _arLocation
-                                          ?.items?[index]
+                                  activeLocations?[index]
                                           .mediaShowcases
                                           ?.first
                                           .url ??
@@ -318,8 +320,7 @@ class _ListArLocationScreenState extends State<ListArLocationScreen> {
                                   crossAxisAlignment: CrossAxisAlignment.start,
                                   children: [
                                     Text(
-                                      _arLocation
-                                              ?.items?[index]
+                                      activeLocations?[index]
                                               .arLocationTranslations
                                               ?.last
                                               .name ??
@@ -328,6 +329,12 @@ class _ListArLocationScreenState extends State<ListArLocationScreen> {
                                         fontWeight: FontWeight.bold,
                                         fontSize: 16,
                                       ),
+                                    ),
+                                    Text(
+                                      activeLocations?[index]
+                                              .culturalSite
+                                              ?.code ??
+                                          '',
                                     ),
                                     const SizedBox(height: 4),
                                     FutureBuilder<bool>(
