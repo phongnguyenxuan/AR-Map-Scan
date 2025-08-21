@@ -1,8 +1,26 @@
 import 'package:flutter/services.dart';
 import 'dart:async';
+import 'package:flutter_application_ar/services/video_download_service.dart';
 
 class ARService {
   static const MethodChannel _channel = MethodChannel('ar_persistent_objects');
+
+  // AR Location Data Management
+  Future<bool> setARLocationData(int culturalSiteId, int arLocationId) async {
+    try {
+      final result = await _channel.invokeMethod('setARLocationData', {
+        'culturalSiteId': culturalSiteId,
+        'arLocationId': arLocationId,
+      });
+      print(
+        'DEBUG: Set AR location data - culturalSiteId: $culturalSiteId, arLocationId: $arLocationId',
+      );
+      return result ?? false;
+    } catch (e) {
+      print('Error setting AR location data: $e');
+      return false;
+    }
+  }
 
   // AR Session Management
   Future<bool> startARSession() async {
@@ -82,7 +100,51 @@ class ARService {
     }
   }
 
-  // AR Object Management - Video from Assets
+  // AR Object Management - Video from Local Storage
+  Future<bool> placeLocalVideo({
+    required String objectId,
+    required int culturalSiteId,
+    required int arLocationId,
+    double? scale,
+    double? rotationX,
+    double? rotationY,
+    double? rotationZ,
+    double? tapX,
+    double? tapY,
+  }) async {
+    try {
+      // Get local video path
+      final localVideoPath = await VideoDownloadService.getLocalVideoPath(
+        culturalSiteId,
+        arLocationId,
+      );
+
+      if (localVideoPath == null) {
+        print('Error: No local video found for location $arLocationId');
+        return false;
+      }
+
+      print('DEBUG: Using local video: $localVideoPath');
+
+      final result = await _channel.invokeMethod('placeObject', {
+        'objectType': 'video',
+        'objectId': objectId,
+        'videoPath': localVideoPath,
+        'scale': scale ?? 1.0,
+        'rotationX': rotationX ?? 0.0,
+        'rotationY': rotationY ?? 0.0,
+        'rotationZ': rotationZ ?? 0.0,
+        'tapX': tapX ?? 0.5,
+        'tapY': tapY ?? 0.5,
+      });
+      return result ?? false;
+    } catch (e) {
+      print('Error placing local video object: $e');
+      return false;
+    }
+  }
+
+  // AR Object Management - Video from Assets (Fallback)
   Future<bool> placeObject({
     required String objectId,
     String? videoAsset,
@@ -412,6 +474,81 @@ class ARService {
       return result ?? false;
     } catch (e) {
       print('Error deleting exported map: $e');
+      return false;
+    }
+  }
+
+  // MARK: - Gesture Control for Zoom and Rotate
+
+  /// Setup gesture recognizers for zoom and rotate
+  Future<bool> setupGestureRecognizers() async {
+    try {
+      final result = await _channel.invokeMethod('setupGestureRecognizers');
+      return result ?? false;
+    } catch (e) {
+      print('Error setting up gesture recognizers: $e');
+      return false;
+    }
+  }
+
+  /// Enable or disable gesture control
+  Future<bool> enableGestureControl(bool enabled) async {
+    try {
+      final result = await _channel.invokeMethod('enableGestureControl', {
+        'enabled': enabled,
+      });
+      return result ?? false;
+    } catch (e) {
+      print('Error enabling gesture control: $e');
+      return false;
+    }
+  }
+
+  /// Select a video object for gesture control (zoom and rotate)
+  Future<bool> selectVideoForGestureControl(String objectId) async {
+    try {
+      final result = await _channel.invokeMethod(
+        'selectVideoForGestureControl',
+        {'objectId': objectId},
+      );
+      return result ?? false;
+    } catch (e) {
+      print('Error selecting video for gesture control: $e');
+      return false;
+    }
+  }
+
+  /// Zoom a specific video object
+  Future<bool> zoomVideo(String objectId, double scale) async {
+    try {
+      final result = await _channel.invokeMethod('updateObject', {
+        'objectId': objectId,
+        'scale': scale,
+      });
+      return result ?? false;
+    } catch (e) {
+      print('Error zooming video: $e');
+      return false;
+    }
+  }
+
+  /// Rotate a specific video object
+  Future<bool> rotateVideo(
+    String objectId, {
+    double? rotationX,
+    double? rotationY,
+    double? rotationZ,
+  }) async {
+    try {
+      final result = await _channel.invokeMethod('updateObject', {
+        'objectId': objectId,
+        'rotationX': rotationX,
+        'rotationY': rotationY,
+        'rotationZ': rotationZ,
+      });
+      return result ?? false;
+    } catch (e) {
+      print('Error rotating video: $e');
       return false;
     }
   }

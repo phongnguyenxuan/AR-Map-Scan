@@ -28,7 +28,9 @@ class _ObjectLibraryScreenState extends State<ObjectLibraryScreen> {
 
   List<Map<String, dynamic>> get _filteredObjects {
     if (_selectedFilter == 'all') return _objects;
-    return _objects.where((obj) => obj['objectType'] == _selectedFilter).toList();
+    return _objects
+        .where((obj) => obj['objectType'] == _selectedFilter)
+        .toList();
   }
 
   @override
@@ -39,10 +41,7 @@ class _ObjectLibraryScreenState extends State<ObjectLibraryScreen> {
         backgroundColor: Colors.orange[600],
         foregroundColor: Colors.white,
         actions: [
-          IconButton(
-            icon: const Icon(Icons.refresh),
-            onPressed: _loadObjects,
-          ),
+          IconButton(icon: const Icon(Icons.refresh), onPressed: _loadObjects),
         ],
       ),
       body: Column(
@@ -67,7 +66,7 @@ class _ObjectLibraryScreenState extends State<ObjectLibraryScreen> {
               ),
             ),
           ),
-          
+
           // Objects List
           Expanded(
             child: _filteredObjects.isEmpty
@@ -91,9 +90,7 @@ class _ObjectLibraryScreenState extends State<ObjectLibraryScreen> {
                         const SizedBox(height: 8),
                         Text(
                           'Place some objects in AR to see them here',
-                          style: TextStyle(
-                            color: Colors.grey[500],
-                          ),
+                          style: TextStyle(color: Colors.grey[500]),
                         ),
                       ],
                     ),
@@ -128,11 +125,7 @@ class _ObjectLibraryScreenState extends State<ObjectLibraryScreen> {
       },
       label: Row(
         mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, size: 16),
-          const SizedBox(width: 4),
-          Text(label),
-        ],
+        children: [Icon(icon, size: 16), const SizedBox(width: 4), Text(label)],
       ),
       selectedColor: Colors.orange[100],
       checkmarkColor: Colors.orange[800],
@@ -146,10 +139,7 @@ class _ObjectLibraryScreenState extends State<ObjectLibraryScreen> {
       child: ListTile(
         leading: CircleAvatar(
           backgroundColor: _getObjectColor(obj['objectType']),
-          child: Icon(
-            _getObjectIcon(obj['objectType']),
-            color: Colors.white,
-          ),
+          child: Icon(_getObjectIcon(obj['objectType']), color: Colors.white),
         ),
         title: Text(obj['objectId'] ?? 'Unknown Object'),
         subtitle: Column(
@@ -163,10 +153,7 @@ class _ObjectLibraryScreenState extends State<ObjectLibraryScreen> {
                 const SizedBox(width: 4),
                 Text(
                   _formatTimestamp(obj['timestamp']),
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: Colors.grey[600],
-                  ),
+                  style: TextStyle(fontSize: 12, color: Colors.grey[600]),
                 ),
               ],
             ),
@@ -178,11 +165,7 @@ class _ObjectLibraryScreenState extends State<ObjectLibraryScreen> {
             const PopupMenuItem(
               value: 'edit',
               child: Row(
-                children: [
-                  Icon(Icons.edit),
-                  SizedBox(width: 8),
-                  Text('Edit'),
-                ],
+                children: [Icon(Icons.edit), SizedBox(width: 8), Text('Edit')],
               ),
             ),
             const PopupMenuItem(
@@ -270,15 +253,17 @@ class _ObjectLibraryScreenState extends State<ObjectLibraryScreen> {
             _buildDetailRow('Type', obj['objectType'] ?? 'Unknown'),
             _buildDetailRow('Content', obj['content'] ?? 'No content'),
             _buildDetailRow('Scale', obj['scale']?.toString() ?? '1.0'),
-            _buildDetailRow('Position', 
+            _buildDetailRow(
+              'Position',
               'X: ${obj['positionX']?.toStringAsFixed(2) ?? '0.00'}, '
-              'Y: ${obj['positionY']?.toStringAsFixed(2) ?? '0.00'}, '
-              'Z: ${obj['positionZ']?.toStringAsFixed(2) ?? '0.00'}'
+                  'Y: ${obj['positionY']?.toStringAsFixed(2) ?? '0.00'}, '
+                  'Z: ${obj['positionZ']?.toStringAsFixed(2) ?? '0.00'}',
             ),
-            _buildDetailRow('Rotation',
+            _buildDetailRow(
+              'Rotation',
               'X: ${obj['rotationX']?.toStringAsFixed(2) ?? '0.00'}, '
-              'Y: ${obj['rotationY']?.toStringAsFixed(2) ?? '0.00'}, '
-              'Z: ${obj['rotationZ']?.toStringAsFixed(2) ?? '0.00'}'
+                  'Y: ${obj['rotationY']?.toStringAsFixed(2) ?? '0.00'}, '
+                  'Z: ${obj['rotationZ']?.toStringAsFixed(2) ?? '0.00'}',
             ),
           ],
         ),
@@ -446,7 +431,13 @@ class _ObjectLibraryScreenState extends State<ObjectLibraryScreen> {
     }
   }
 
-  Widget _buildSlider(String label, double value, double min, double max, ValueChanged<double> onChanged) {
+  Widget _buildSlider(
+    String label,
+    double value,
+    double min,
+    double max,
+    ValueChanged<double> onChanged,
+  ) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
